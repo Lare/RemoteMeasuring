@@ -8,3 +8,4 @@ Hardware required:
 - Ethernet2 shield
 - DS1307RTC compatible RTC-chip
 - At least one Dallas DS1820 compatible temperature sensor
+- Suitable pull up resistor, for example 4.7k
