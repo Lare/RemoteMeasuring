@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <Ethernet2.h> //https://github.com/adafruit/Ethernet2 (for use with older etherneshield use standard ethernet library. For some reason old ethernet shield does not work properly)
 #include <Timezone.h>    //https://github.com/JChristensen/Timezone
+#include <TimeLib.h>      //Required by Timezone, installed from standard ide libraries (Time by Michael Margolis v.1.5.0)
 #include <SD.h>
 #include <Wire.h>
 #include <DS1307RTC.h>
@@ -20,9 +21,17 @@ char pageName[40];
 // Global Variable for data to send in rest API
 char restData[64];
 
+// Global variable for timestamp
+unsigned long time = 0;
+
+// Global variable to store if DHCP or Static IP is used
+int staticIP = 0;
+
+// Web server for getting time
+
 // Store current millis and set interval to avoid delay usage
 unsigned long sensorpreviousMillis = 0; // last sensor time update
-long sensorinterval = 10; // interval at which to do sensor readings (milliseconds)
+long sensorinterval = 15000; // interval at which to do sensor readings (milliseconds)
 //long sensorinterval = 300000; // interval at which to do sensor readings (milliseconds)
 unsigned long timecheckpreviousMillis = 0; // last ntp time update
 unsigned long timecheckinterval = 3600000; // interval at which to do time sync (milliseconds)
@@ -75,9 +84,9 @@ char serverName[] = "rest.example.com";
 // Sensor addresses make sure that sensors are in desired order. First address is for sensor1, second for sensor2 and so on.
 DeviceAddress temp[]=
   {
-    { 0x28, 0x46, 0xE7, 0xBB, 0x02, 0x00, 0x00, 0x18 },
-    { 0x10, 0xD6, 0xBF, 0x3B, 0x02, 0x08, 0x00, 0x48 },
-    { 0x28, 0xDE, 0x1D, 0x81, 0x07, 0x00, 0x00, 0x75 }  
+    { 0x28, 0xDE, 0x1D, 0x81, 0x07, 0x00, 0x00, 0x75 }    
+  //  { 0x10, 0xD6, 0xBF, 0x3B, 0x02, 0x08, 0x00, 0x48 },  
+  //  { 0x28, 0x46, 0xE7, 0xBB, 0x02, 0x00, 0x00, 0x18 }
   };
 DeviceAddress tempDeviceAddress; // We'll use this variable to store a found device address when searching devices.
 
@@ -142,14 +151,14 @@ void setup() {
    
   // Start Serial
   Serial.begin(115200);
-
+  
   Serial.println("Starting temperature measurement system version 0.1 ...");
   if (environment == 0) {
-  // Because of problems on booting when power outage occured (may be problem with slow router startup) added a delay
-  Serial.println("Waiting 30 seconds for router to get ready in case of complete power outage");
-  delay(30000);
+    // Because of problems on booting when power outage occured (may be problem with slow router startup) added a delay
+    Serial.println("Waiting 10 seconds for router to get ready in case of complete power outage");
+    delay(10000);
   }
-
+  
   // Display number of configured sensors in system
   Serial.println();
   Serial.print("Number of configured sensors in system: ");
@@ -204,17 +213,19 @@ void setup() {
         Serial.println(fileName);
         SD.remove(fileName);
       }
-      Serial.println();
     }
+    Serial.println();
     digitalWrite(SS_SD_CARD, HIGH); // SD Card not active
     digitalWrite(SS_ETHERNET, LOW); // Ethernet active
   }
 
+  Serial.println("Starting ethernet. In case of dhcp issue, this may take a while...");
   // Start the Ethernet connection and the server
   if (Ethernet.begin(mac) == 0) {
     Serial.println("Failed to configure Ethernet using DHCP");
     // try to congifure using IP address instead of DHCP:
-    Ethernet.begin(mac, ip, dns, gateway, subnet);
+    Ethernet.begin(mac, ip, dnServer, gateway, subnet);
+    staticIP = 1;
   }
 
   Serial.println();
@@ -232,8 +243,10 @@ void setup() {
 void loop() {
   
   // If using DHCP this keeps IP address reseved. If using static IP, comment out the next line
-  Ethernet.maintain();
-
+  if (staticIP == 0) {
+    Ethernet.maintain();
+  }
+  
   // read temps periodically
   unsigned long sensorcurrentMillis = millis();
   if (sensorcurrentMillis - sensorpreviousMillis > sensorinterval) {
@@ -246,11 +259,17 @@ void loop() {
     restoreDataBuffer(i);
   }
 
-  // Time sync
+  // Time sync periodically
   unsigned long timecheckcurrentMillis = millis();
   if (timecheckcurrentMillis - timecheckpreviousMillis > timecheckinterval) {
     timecheckpreviousMillis = timecheckcurrentMillis;
-    webUnixTime(clienttime);    
+    webUnixTime(clienttime);        
+  }
+
+  // Time sync in case time has not been synced
+  if (time == 0) {
+    Serial.println("Time not configured, trying to get time");
+    webUnixTime(clienttime);
   }
 
   // Serial.print("Free ram: ");
@@ -261,8 +280,7 @@ void loop() {
 
 // Get unix time from a web server
 void webUnixTime (Client &clienttime) {
-  unsigned long time = 0;
-
+  
   // Just choose any reasonably busy web server, the load is really low
   if (clienttime.connect(timeServer, 80)) {
     // Make an HTTP 1.1 request which is missing a Host: header
@@ -329,39 +347,14 @@ void webUnixTime (Client &clienttime) {
   } else {
     Serial.println ("Time not available from server. Using RTC time.");
     time = RTC.get();
-    if (time == 0) {
-      Serial.println("Error getting time from RTC or RTC time not configured!");
-    } else {
+    if (time > 0) {
       Serial.println("System time updated from RTC");
       setTime(time);
+    } else {
+      Serial.println("Error getting time from RTC or RTC time not configured!");
     }
   }
 }
-
-/*
-//Function to return the compile date and time as a time_t value
-time_t compileTime(void) {
-#define FUDGE 25        //fudge factor to allow for compile time (seconds, YMMV)
-
-  char *compDate = __DATE__, *compTime = __TIME__, *months = "JanFebMarAprMayJunJulAugSepOctNovDec";
-  char chMon[3], *m;
-  int d, y;
-  tmElements_t tm;
-  time_t t;
-
-  strncpy(chMon, compDate, 3);
-  chMon[3] = '\0';
-  m = strstr(months, chMon);
-  tm.Month = ((m - months) / 3 + 1);
-  tm.Day = atoi(compDate + 4);
-  tm.Year = atoi(compDate + 7) - 1970;
-  tm.Hour = atoi(compTime);
-  tm.Minute = atoi(compTime + 3);
-  tm.Second = atoi(compTime + 6);
-  t = makeTime(tm);
-  return t + FUDGE;        //add fudge factor to allow for compile time
-}
-*/
 
 //Function to create timestamp
 String timestamp(time_t t) {
@@ -491,7 +484,6 @@ void readAndPostOnewireSensorData (String timeValueString, int sensorid) {
 // Printing onewire results
 float printTemperature(DeviceAddress deviceAddress) {
   float tempC = sensors.getTempC(deviceAddress);
-  // float tempC = 25.00;
   if (tempC == -127.00 || tempC == 85.00) {
     // Returning value that is not accetable by server configuration, so not stored anywhere
     return 9999.99;
@@ -556,7 +548,7 @@ byte postPage(char* domainBuffer, int thisPort, char* page, char* sensorData, in
         i++;
         Serial.print(inData);
         if (i == 1) {
-          httpstatus = inData.substring(9, 12);
+          httpstatus = inData.substring(9, 12);          
         }
         inData = ""; // Clear buffer
       }
@@ -575,50 +567,54 @@ byte postPage(char* domainBuffer, int thisPort, char* page, char* sensorData, in
   }
   Serial.println("}");
   Serial.println();
-  if (httpstatus == "401") {
-    Serial.println("401 Unauthorized -> logging data if not logged already");
-    if (callerid == 0) {
-      Serial.println(" failed, writing data to log file");
-      sdWriteData(sensorData, sensorid);
-    }
-    Serial.println("disconnecting.");
-    clientrest.stop();
-    return 0;
-    } else if (httpstatus == "404") {
-      Serial.println("404 Not found. Server configuration problem. Please check rewrite rules and .htaccess -> Logging data if not logged already");
-    if (callerid == 0) {
-      Serial.println(" failed, writing data to log file");
-      sdWriteData(sensorData, sensorid);
-    } 
-    Serial.println("disconnecting.");
-    clientrest.stop();
-    return 0;
-    } else if (httpstatus == "500") {
-      Serial.println("500 Internal server error. Server configuration problem -> Logging data if not logged already");
-      if (callerid == 0) {
-        Serial.println(" failed, writing data to log file");
-        sdWriteData(sensorData, sensorid);
-      } 
-      Serial.println("disconnecting.");
-      clientrest.stop();
-      return 0;
-    } else if (httpstatus == "405") {
-      Serial.println("405 Method not allowed. Propably unacceptable data sent. (Wrong format or timestamp which is already stored in database) -> Not logging data");
-      Serial.println("disconnecting.");
-      clientrest.stop();
-      return 1;
-    } else {
-      // Any undefined status code will be considered as sent
-      Serial.print("HTTP Status code: ");
-      Serial.print(httpstatus);
-      Serial.println(". Data considered to be sent, or we do not want to send or log it -> Not logging data");
-      Serial.println("disconnecting.");
-      clientrest.stop();
-      return 1;
+    switch (httpstatus.toInt()) {
+      case 401:
+        Serial.println("401 Unauthorized -> logging data if not logged already");
+        if (callerid == 0) {
+          Serial.println(" failed, writing data to log file");
+          sdWriteData(sensorData, sensorid);
+        }
+        Serial.println("disconnecting.");
+        clientrest.stop();
+        return 0;
+        break;
+      case 404:
+        Serial.println("404 Not found. Server configuration problem. Please check rewrite rules and .htaccess -> Logging data if not logged already");
+        if (callerid == 0) {
+          Serial.println(" failed, writing data to log file");
+          sdWriteData(sensorData, sensorid);
+        } 
+        Serial.println("disconnecting.");
+        clientrest.stop();
+        return 0;
+        break;
+      case 500:
+        Serial.println("500 Internal server error. Server configuration problem -> Logging data if not logged already");
+        if (callerid == 0) {
+          Serial.println(" failed, writing data to log file");
+          sdWriteData(sensorData, sensorid);
+        } 
+        Serial.println("disconnecting.");
+        clientrest.stop();
+        return 0;
+        break;
+      case 405:
+        Serial.println("405 Method not allowed. Propably unacceptable data sent. (Wrong format or timestamp which is already stored in database) -> Not logging data");
+        Serial.println("disconnecting.");
+        clientrest.stop();
+        return 1;
+        break;
+      default:
+        // Any undefined status code will be considered as sent
+        Serial.print("HTTP Status code: ");
+        Serial.print(httpstatus);
+        Serial.println(". Data considered to be sent, or we do not want to send or log it -> Not logging data");
+        Serial.println("disconnecting.");
+        clientrest.stop();
+        return 1;
+        break;
     }
 }
-
-
 
 /* // Debug freeram
 
@@ -699,6 +695,13 @@ void restoreDataBuffer(int sensorid) {
 
   // If tempfile and buffer is same size, we know that all data has been passed to server and we can delete both files
   sensorFileSize = dataFile.size();
+  if (sensorFileSize > 0) {
+    Serial.println();
+    Serial.print("Sensor");
+    Serial.print(sensorid);
+    Serial.print(" file size is total: ");
+    Serial.println(sensorFileSize);
+  }
   if (sensorFileSize == tempSensorFileSize && sensorFileSize != 0) {
     dataFile.close();
     SD.remove(tempSensorFile);
@@ -713,7 +716,6 @@ void restoreDataBuffer(int sensorid) {
 
   if (dataFile) {
     // go to position pointed at last stage and read one line:
-    Serial.println();
     Serial.print("Temporary file size for sensor");
     Serial.print(sensorid);
     Serial.print(" is: ");
